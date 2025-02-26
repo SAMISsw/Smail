@@ -4,6 +4,7 @@ import CoreLocation
 import UserNotifications
 import MobileCoreServices
 import AVKit
+import WebKit
 
 class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNearbyServiceAdvertiserDelegate, MCNearbyServiceBrowserDelegate, MCSessionDelegate {
     @Published var messages: [Message] = []
@@ -24,7 +25,7 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNea
     var advertiser: MCNearbyServiceAdvertiser
     var browser: MCNearbyServiceBrowser
     var locationManager = CLLocationManager()
-    
+
     override init() {
         session = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
         advertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: ["app": "emailApp"], serviceType: "email-chat")
@@ -40,19 +41,23 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNea
         browser.startBrowsingForPeers()
         requestNotificationPermission()
     }
-    
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         userLocation = locations.last
     }
-    
+
     func sendMessage(_ content: String) {
         isSendingMessage = true
-        let message = Message(sender: myPeerID.displayName, content: content, timestamp: Date())
+        let message = Message(sender: myPeerID.displayName, content: compileHTML(content), timestamp: Date())
+        saveMessageToInbox(message, isSender: true) 
         if let data = try? JSONEncoder().encode(message) {
             for user in selectedUsers {
                 do {
                     try session.send(data, toPeers: [user], with: .reliable)
-                } catch {}
+                    saveMessageToInbox(message, isSender: false) 
+                } catch {
+                    print("Failed to send message: \(error)")
+                }
             }
             DispatchQueue.main.async {
                 self.messages.append(message)
@@ -60,7 +65,7 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNea
             }
         }
     }
-    
+
     func uploadFile() {
         guard let fileURL = fileURL else { return }
         let fileData = try? Data(contentsOf: fileURL)
@@ -69,18 +74,20 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNea
             for user in selectedUsers {
                 do {
                     try session.send(data, toPeers: [user], with: .reliable)
-                } catch {}
+                } catch {
+                    print("Failed to upload file: \(error)")
+                }
             }
             DispatchQueue.main.async {
                 self.isUploadingFile = false
             }
         }
     }
-    
+
     func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
-    
+
     func sendNotification(for message: Message) {
         let content = UNMutableNotificationContent()
         content.title = "Nova Mensagem de \(message.sender)"
@@ -89,22 +96,42 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate, MCNea
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
-    
+
     func updateFileURL(url: URL) {
         self.fileURL = url
     }
-    
+
     func sendToMultipleUsers(content: String) {
-        let message = Message(sender: myPeerID.displayName, content: content, timestamp: Date())
+        let message = Message(sender: myPeerID.displayName, content: compileHTML(content), timestamp: Date())
         if let data = try? JSONEncoder().encode(message) {
             for user in selectedUsers {
                 do {
                     try session.send(data, toPeers: [user], with: .reliable)
-                } catch {}
+                } catch {
+                    print("Failed to send message: \(error)")
+                }
             }
             DispatchQueue.main.async {
                 self.messages.append(message)
             }
+        }
+    }
+
+    func compileHTML(_ content: String) -> String {
+        let compiledContent = content.replacingOccurrences(of: "<script.*?>.*?</script>", with: "", options: .regularExpression, range: nil)
+        return compiledContent
+    }
+
+    func saveMessageToInbox(_ message: Message, isSender: Bool) {
+        let inbox = isSender ? "senderInbox" : "recipientInbox"
+        var storedMessages: [Message] = []
+        if let data = UserDefaults.standard.data(forKey: inbox),
+           let decodedMessages = try? JSONDecoder().decode([Message].self, from: data) {
+            storedMessages = decodedMessages
+        }
+        storedMessages.append(message)
+        if let encodedMessages = try? JSONEncoder().encode(storedMessages) {
+            UserDefaults.standard.set(encodedMessages, forKey: inbox)
         }
     }
 }
@@ -216,12 +243,36 @@ struct EmailDetailView: View {
                 } else if fileURL.pathExtension == "mp4" {
                     VideoPlayer(player: AVPlayer(url: fileURL))
                         .frame(height: 300)
+                } else if fileURL.pathExtension == "html" {
+                    WebView(url: fileURL)
+                        .frame(height: 300)
                 }
             }
             
             Spacer()
         }
         .padding()
+    }
+}
+
+struct WebView: View {
+    var url: URL
+    
+    var body: some View {
+        WebViewRepresentable(url: url)
+            .edgesIgnoringSafeArea(.all)
+    }
+}
+
+struct WebViewRepresentable: UIViewRepresentable {
+    var url: URL
+    
+    func makeUIView(context: Context) -> WKWebView {
+        return WKWebView()
+    }
+    
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        uiView.load(URLRequest(url: url))
     }
 }
 
