@@ -4,6 +4,7 @@ import CoreLocation
 import UserNotifications
 import MobileCoreServices
 import AVKit
+import UniformTypeIdentifiers
 
 class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var messages: [Message] = []
@@ -18,22 +19,21 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var isShowingControls = false
     @Published var isFileUploaded = false
     @Published var searchQuery = ""
-
+    
     var connection: NWConnection?
     var listener: NWListener?
     var listenerPort: UInt16 = 12345
     var locationManager = CLLocationManager()
-
+    
     override init() {
         super.init()
         locationManager.delegate = self
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
-        
         requestNotificationPermission()
         setupListener()
     }
-
+    
     func setupListener() {
         do {
             let parameters = NWParameters(tls: nil)
@@ -47,7 +47,7 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
             print("Error setting up listener: \(error)")
         }
     }
-
+    
     func handleIncomingConnection(_ connection: NWConnection) {
         self.connection = connection
         connection.stateUpdateHandler = { state in
@@ -60,7 +60,7 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         }
         connection.start(queue: .main)
     }
-
+    
     func receiveMessage(from connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1000) { data, _, isComplete, _ in
             if let data = data, isComplete {
@@ -73,22 +73,23 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
             }
         }
     }
-
+    
     func sendMessage(_ content: String) {
         isSendingMessage = true
-        let message = Message(sender: "Device", content: content, timestamp: Date())
+        let message = Message(sender: UIDevice.current.name, content: content, timestamp: Date(), fileURL: fileURL)
         if let data = try? JSONEncoder().encode(message), let connection = connection {
             connection.send(content: data, completion: .contentProcessed({ error in
                 if error == nil {
                     DispatchQueue.main.async {
                         self.messages.append(message)
                         self.isSendingMessage = false
+                        self.fileURL = nil
                     }
                 }
             }))
         }
     }
-
+    
     func uploadFile() {
         guard let fileURL = fileURL else { return }
         let fileData = try? Data(contentsOf: fileURL)
@@ -103,11 +104,11 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
             }))
         }
     }
-
+    
     func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
-
+    
     func sendNotification(for message: Message) {
         let content = UNMutableNotificationContent()
         content.title = "Nova Mensagem de \(message.sender)"
@@ -116,18 +117,19 @@ class EmailManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
-
+    
     func updateFileURL(url: URL) {
         self.fileURL = url
     }
-
+    
     func sendToMultipleUsers(content: String) {
-        let message = Message(sender: "Device", content: content, timestamp: Date())
+        let message = Message(sender: UIDevice.current.name, content: content, timestamp: Date(), fileURL: fileURL)
         if let data = try? JSONEncoder().encode(message), let connection = connection {
             connection.send(content: data, completion: .contentProcessed({ error in
                 if error == nil {
                     DispatchQueue.main.async {
                         self.messages.append(message)
+                        self.fileURL = nil
                     }
                 }
             }))
@@ -146,7 +148,7 @@ struct Message: Identifiable, Codable {
 struct EmailAppView: View {
     @StateObject var emailManager = EmailManager()
     @State private var messageText = ""
-
+    
     var body: some View {
         NavigationStack {
             VStack {
@@ -157,7 +159,6 @@ struct EmailAppView: View {
                         .cornerRadius(10)
                         .shadow(radius: 5)
                         .font(.custom("NoteWorthy", size: 18))
-                    
                     Button(action: {
                         emailManager.searchQuery = ""
                     }) {
@@ -167,7 +168,6 @@ struct EmailAppView: View {
                     }
                 }
                 .padding()
-
                 ScrollView {
                     ForEach(emailManager.messages.filter {
                         emailManager.searchQuery.isEmpty || $0.content.localizedCaseInsensitiveContains(emailManager.searchQuery)
@@ -194,7 +194,7 @@ struct EmailAppView: View {
 
 struct EmailCardView: View {
     var message: Message
-
+    
     var body: some View {
         VStack {
             HStack {
@@ -227,24 +227,21 @@ struct EmailDetailView: View {
                 .font(.custom("NoteWorthy", size: 22))
                 .foregroundColor(.pink)
                 .bold()
-            
             Text(message.content)
                 .font(.custom("NoteWorthy", size: 18))
                 .foregroundColor(.black)
                 .padding()
-            
             if let fileURL = message.fileURL {
-                if fileURL.pathExtension == "jpg" || fileURL.pathExtension == "png" {
+                if fileURL.pathExtension.lowercased() == "jpg" || fileURL.pathExtension.lowercased() == "png" {
                     Image(uiImage: UIImage(contentsOfFile: fileURL.path) ?? UIImage())
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 300)
-                } else if fileURL.pathExtension == "mp4" {
+                } else if fileURL.pathExtension.lowercased() == "mp4" {
                     VideoPlayer(player: AVPlayer(url: fileURL))
                         .frame(height: 300)
                 }
             }
-            
             Spacer()
         }
         .padding()
@@ -254,43 +251,45 @@ struct EmailDetailView: View {
 struct NewMessageSheet: View {
     @ObservedObject var emailManager: EmailManager
     @State private var messageText = ""
-
+    @State private var showFileImporter = false
+    @State private var selectedFileURL: URL?
+    
     var body: some View {
         VStack {
             Text("Nova Mensagem")
                 .font(.custom("NoteWorthy", size: 22))
                 .foregroundColor(.pink)
                 .bold()
-            
-            TextField("Digite sua mensagem", text: $messageText)
-                .textFieldStyle(.roundedBorder)
-                .padding()
+            TextEditor(text: $messageText)
                 .font(.custom("NoteWorthy", size: 18))
-            
-            HStack {
-                Button(action: { emailManager.isShowingUserList.toggle() }) {
-                    Image(systemName: "person.2.fill")
-                        .font(.title2)
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.pink)
-                        .cornerRadius(10)
-                }
                 .padding()
-                
+                .frame(height: 120)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.5)))
+                .padding([.horizontal])
+            HStack(spacing: 40) {
+                Button(action: {
+                    showFileImporter = true
+                }) {
+                    Image(systemName: "paperclip")
+                        .font(.title2)
+                        .foregroundColor(.pink)
+                }
+                .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [UTType.image, UTType.movie], allowsMultipleSelection: false) { result in
+                    if case .success(let urls) = result, let url = urls.first {
+                        emailManager.updateFileURL(url: url)
+                    }
+                }
                 Button(action: {
                     emailManager.sendMessage(messageText)
                     emailManager.isShowingMessageSheet = false
+                    messageText = ""
                 }) {
                     Image(systemName: "paperplane.fill")
                         .font(.title2)
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.pink)
-                        .cornerRadius(10)
+                        .foregroundColor(.pink)
                 }
-                .padding()
             }
+            .padding()
             Spacer()
         }
         .padding()
@@ -299,7 +298,7 @@ struct NewMessageSheet: View {
 
 struct UserListSheet: View {
     @ObservedObject var emailManager: EmailManager
-
+    
     var body: some View {
         NavigationStack {
             VStack {
@@ -307,24 +306,22 @@ struct UserListSheet: View {
                     .font(.custom("NoteWorthy", size: 22))
                     .foregroundColor(.pink)
                     .bold()
-                
                 List(emailManager.availableUsers, id: \.id) { user in
                     Button(action: {
                         emailManager.selectedUsers.insert(user.id)
                     }) {
-                        Text(user.id)
-                            .font(.custom("NoteWorthy", size: 18))
-                            .foregroundColor(.black)
+                        Image(systemName: "person.fill")
+                            .font(.title2)
+                            .foregroundColor(.pink)
                     }
                 }
-                
                 HStack {
                     Spacer()
                     Button(action: {
                         emailManager.isShowingUserList = false
                     }) {
-                        Text("Fechar")
-                            .font(.custom("NoteWorthy", size: 18))
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
                             .foregroundColor(.pink)
                     }
                     Spacer()
@@ -337,14 +334,14 @@ struct UserListSheet: View {
 
 struct ControlsSheet: View {
     @ObservedObject var emailManager: EmailManager
-
+    
     var body: some View {
         VStack {
             Button(action: {
                 emailManager.isShowingControls = false
             }) {
-                Text("Fechar Controles")
-                    .font(.custom("NoteWorthy", size: 18))
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title2)
                     .foregroundColor(.pink)
             }
             Spacer()
